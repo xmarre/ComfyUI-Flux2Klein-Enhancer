@@ -281,6 +281,82 @@ Not inpainting — works entirely at the conditioning level through the referenc
 - `strength` also controls boundary bleed — 1.0 is a tight boundary, lower values spread influence into neighboring regions
 - Useful for targeting a specific subject within a scene while leaving the rest open to the prompt
 
+## Identity Preservation Nodes
+
+Two nodes that approach identity preservation from outside the model's conditioning pipeline. They bypass text streams, attention masks, and token injection entirely.
+
+### FLUX.2 Klein Identity Guidance
+
+Operates in the sampling loop. After the model predicts the denoised image at each step, compares it to the reference latent and pulls it back. The model runs freely, then gets corrected.
+
+Takes a VAE-encoded reference image directly. ReferenceLatent should still be connected on the conditioning path so the model has reference context.
+
+**Wiring:**
+```
+[Checkpoint] → MODEL → [Identity Guidance] → MODEL → [KSampler]
+                              ↑
+                    [VAE Encode of reference]
+```
+
+#### Parameters
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `strength` | 0.3 | 0.0 to 1.0 | How hard to pull toward the reference each step. 0.3 = move 30% of the distance. |
+| `start_percent` | 0.0 | 0.0 to 1.0 | When to start correcting. 0.0 = beginning of denoising. |
+| `end_percent` | 0.8 | 0.0 to 1.0 | When to stop correcting. 0.8 = last 20% runs freely for texture refinement. |
+| `mode` | adaptive | adaptive/direct/channel_match | How correction is applied (see below). |
+
+#### Modes
+
+- **adaptive**: Pulls only where the prediction already resembles the reference. Preserves prompt-driven changes like new backgrounds or poses.
+- **direct**: Pulls everywhere equally. Strongest identity lock, least prompt freedom.
+- **channel_match**: Forces the generation's color and feature statistics to match the reference without copying spatial content.
+
+---
+
+### FLUX.2 Klein Identity Feature Transfer
+
+Operates inside the model's attention layers. After each attention block computes, finds where the generation's features are similar to the reference's features and pushes them closer.
+
+**Requires** ReferenceLatent connected. The reference must already be in the image stream.
+
+**Wiring:**
+```
+[Checkpoint] → MODEL → [Identity Feature Transfer] → MODEL → [KSampler]
+                                                        ↑
+                        [ReferenceLatent] → CONDITIONING → [KSampler]
+```
+
+#### Parameters
+
+| Parameter | Default | Range | Description |
+|-----------|---------|-------|-------------|
+| `strength` | 0.15 | 0.0 to 1.0 | Per-block blend factor. Fires at every active block (cumulative). Start at 0.10 to 0.20. |
+| `start_block` | 0 | 0 to 23 | First block index to apply. Index is shared across double and single blocks (resets when single blocks begin). |
+| `end_block` | 23 | 0 to 23 | Last block index to apply. Covers 8 double blocks (0-7) then 24 single blocks (index resets 0-23). |
+| `mode` | cosine_pull | cosine_pull/topk_replace/mean_transfer | How features are transferred (see below). |
+| `top_k_percent` | 0.25 | 0.01 to 1.0 | topk_replace mode only. Fraction of tokens to affect. |
+
+#### Modes
+
+- **cosine_pull**: Each generation token finds its most similar reference token and gets pulled toward it. Strength scales with similarity.
+- **topk_replace**: Only the top K% most similar tokens are affected. Everything else stays untouched.
+- **mean_transfer**: Shifts the overall feature distribution toward the reference without spatial matching.
+
+---
+
+### Combining Both Nodes
+
+Both nodes can be stacked. Identity Guidance handles macro-level correction in latent space. Feature Transfer handles micro-level feature alignment inside attention. They operate at different stages and don't interfere.
+
+```
+[Checkpoint] → MODEL → [Identity Feature Transfer] → MODEL → [Identity Guidance] → MODEL → [KSampler]
+```
+
+
+
+
 
 ## Technical Details
 
