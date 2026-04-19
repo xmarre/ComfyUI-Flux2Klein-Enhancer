@@ -4,6 +4,43 @@ import torch
 import torch.nn.functional as F
 
 
+_COSINE_MATCH_REF_CHUNK = 512
+
+
+def _best_ref_match_chunked(gen_features, ref_features, ref_chunk_size=_COSINE_MATCH_REF_CHUNK):
+    """
+    Compute per-generation-token best reference token without materializing the
+    full [B, G, R] similarity matrix at once.
+    Returns:
+      best_sim: [B, G] float32
+      best_idx: [B, G] int64
+    """
+    gen_norm = F.normalize(gen_features.float(), dim=-1)
+    ref_norm = F.normalize(ref_features.float(), dim=-1)
+
+    bsz, gen_tokens, _ = gen_norm.shape
+    ref_tokens = ref_norm.shape[1]
+
+    best_sim = torch.full(
+        (bsz, gen_tokens),
+        float("-inf"),
+        device=gen_norm.device,
+        dtype=gen_norm.dtype,
+    )
+    best_idx = torch.zeros((bsz, gen_tokens), device=gen_norm.device, dtype=torch.long)
+
+    for ref_start in range(0, ref_tokens, ref_chunk_size):
+        ref_chunk = ref_norm[:, ref_start:ref_start + ref_chunk_size]
+        sim_chunk = torch.bmm(gen_norm, ref_chunk.transpose(1, 2))
+        chunk_sim, chunk_idx = sim_chunk.max(dim=-1)
+
+        better = chunk_sim > best_sim
+        best_sim = torch.where(better, chunk_sim, best_sim)
+        best_idx = torch.where(better, chunk_idx + ref_start, best_idx)
+
+    return best_sim, best_idx
+
+
 class IdentityFeatureTransfer:
 
     @classmethod
@@ -82,11 +119,7 @@ class IdentityFeatureTransfer:
             ref_features = attn[:, ref_start:ref_end]
 
             if _mode == "cosine_pull":
-                gen_norm = F.normalize(gen_features.float(), dim=-1)
-                ref_norm = F.normalize(ref_features.float(), dim=-1)
-
-                sim = torch.bmm(gen_norm, ref_norm.transpose(1, 2))
-                max_sim, max_idx = sim.max(dim=-1)
+                max_sim, max_idx = _best_ref_match_chunked(gen_features, ref_features)
 
                 weight = max_sim.clamp(0.0, 1.0) * _strength
                 weight = weight.unsqueeze(-1).to(attn.dtype)
@@ -100,10 +133,7 @@ class IdentityFeatureTransfer:
                 attn[:, gen_start:gen_end] = new_gen
 
             elif _mode == "topk_replace":
-                gen_norm = F.normalize(gen_features.float(), dim=-1)
-                ref_norm = F.normalize(ref_features.float(), dim=-1)
-                sim = torch.bmm(gen_norm, ref_norm.transpose(1, 2))
-                max_sim, max_idx = sim.max(dim=-1)
+                max_sim, max_idx = _best_ref_match_chunked(gen_features, ref_features)
 
                 k = max(1, int(gen_features.shape[1] * _topk_pct))
                 topk_vals, topk_indices = max_sim.topk(k, dim=-1)
