@@ -21,6 +21,17 @@ def _best_ref_match_chunked(gen_features, ref_features, ref_chunk_size=_COSINE_M
     bsz, gen_tokens, _ = gen_norm.shape
     ref_tokens = ref_norm.shape[1]
 
+    if not isinstance(ref_chunk_size, int) or ref_chunk_size <= 0:
+        raise ValueError(
+            "_best_ref_match_chunked: ref_chunk_size must be an int > 0, "
+            f"got {ref_chunk_size!r}"
+        )
+    if ref_tokens == 0:
+        raise ValueError(
+            "_best_ref_match_chunked: ref_tokens must be > 0, "
+            f"got {ref_tokens}"
+        )
+
     best_sim = torch.full(
         (bsz, gen_tokens),
         float("-inf"),
